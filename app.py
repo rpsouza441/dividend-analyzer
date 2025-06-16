@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import logging
+import yfinance as yf
 
 # Configuração básica de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,43 +19,75 @@ analyzer = StockAnalyzer()
 # para evitar recalcular em cada requisição.
 global_volatilidade_mercado = None
 
+# Flag para garantir que a inicialização rode apenas uma vez
+setup_complete = False 
+
+
 def calculate_market_volatility(tickers_to_benchmark: list):
     """
     Calcula a volatilidade de um conjunto de ações para servir de benchmark.
+    Faz o download dos dados de múltiplos tickers em uma única requisição.
     """
     logging.info("Calculando volatilidade de um conjunto de ações para benchmark...")
-    volatilidades_do_mercado = {}
     
+    # Adiciona o sufixo .SA para todos os tickers do benchmark
+    tickers_yf_format = [f"{t}{analyzer.B3_SUFFIX}" for t in tickers_to_benchmark]
+
     end_date_vol = datetime.now()
     start_date_vol = end_date_vol - timedelta(days=365) # Último ano para volatilidade
     
-    for t in tickers_to_benchmark:
-        try:
-            hist_vol_mercado = yf.download(f"{t}{analyzer.B3_SUFFIX}", start=start_date_vol, end=end_date_vol, progress=False)
-            if not hist_vol_mercado.empty and len(hist_vol_mercado) > 1:
-                retornos_diarios_mercado = hist_vol_mercado['Close'].pct_change().dropna()
-                volatilidade_anualizada_mercado = retornos_diarios_mercado.std() * np.sqrt(252)
-                volatilidades_do_mercado[t] = volatilidade_anualizada_mercado
+    volatilidades_do_mercado = {}
+
+    try:
+        # Baixa dados de TODOS os tickers em UMA ÚNICA REQUISIÇÃO
+        # Isso é muito mais eficiente do que um loop com download individual
+        data = yf.download(tickers_yf_format, start=start_date_vol, end=end_date_vol, progress=False)
+
+        if data.empty:
+            logging.warning("    [Benchmark Volatilidade] Nenhum dado de benchmark baixado. Pode ser problema de conexão ou tickers inválidos.")
+            return pd.Series() # Retorna uma série vazia
+
+        # Acessa os preços de fechamento ('Close')
+        # 'data' terá múltiplos níveis de coluna se for mais de um ticker
+        close_prices = data['Close']
+
+        for t in tickers_to_benchmark:
+            yf_ticker = f"{t}{analyzer.B3_SUFFIX}"
+            if yf_ticker in close_prices.columns:
+                # Retornos diários para este ticker específico
+                returns = close_prices[yf_ticker].pct_change().dropna()
+                if not returns.empty:
+                    volatilidad_anualizada = returns.std() * np.sqrt(252)
+                    volatilidades_do_mercado[t] = volatilidad_anualizada
+                else:
+                    logging.warning(f"    [Benchmark Volatilidade] Dados insuficientes ou sem variações para {t}.")
             else:
-                logging.warning(f"    [Benchmark Volatilidade] Dados insuficientes para {t}.")
-        except Exception as e:
-            logging.error(f"    [Benchmark Volatilidade] Erro ao obter volatilidade para {t}: {e}")
+                logging.warning(f"    [Benchmark Volatilidade] Ticker {t} não encontrado nos dados baixados.")
+
+    except Exception as e:
+        # Captura erros que podem ocorrer no download em bloco
+        logging.error(f"    [Benchmark Volatilidade] Erro geral ao obter volatilidade para o benchmark: {e}")
 
     return pd.Series(volatilidades_do_mercado)
 
-@app.before_first_request
+
+# MODIFICAÇÃO AQUI: Usando @app.before_request com uma flag
+@app.before_request
 def setup_application():
     """
-    Executa antes da primeira requisição para inicializar dados globais.
+    Executa antes de cada requisição, mas o setup global só roda na primeira vez.
     """
+    global setup_complete
     global global_volatilidade_mercado
-    
-    # Lista de tickers para calcular o benchmark de volatilidade.
-    # EXPANDA ESTA LISTA COM MUITAS AÇÕES DO IBOVESPA OU RELEVANTES.
-    tickers_para_benchmark = ["ITUB4", "BBDC4", "PETR4", "VALE3", "ABEV3", "WEGE3", "PRIO3", "MGLU3", "RENT3", "BPAC11"]
-    
-    global_volatilidade_mercado = calculate_market_volatility(tickers_para_benchmark)
-    logging.info("Setup inicial da aplicação concluído.")
+
+    if not setup_complete:
+        # Lista de tickers para calcular o benchmark de volatilidade.
+        # EXPANDA ESTA LISTA COM MUITAS AÇÕES DO IBOVESPA OU RELEVANTES.
+        tickers_para_benchmark = ["ITUB4", "BBDC4", "PETR4", "VALE3", "ABEV3", "WEGE3", "PRIO3", "MGLU3", "RENT3", "BPAC11"]
+        
+        global_volatilidade_mercado = calculate_market_volatility(tickers_para_benchmark)
+        logging.info("Setup inicial da aplicação concluído.")
+        setup_complete = True # Marca como completo para não rodar novamente
 
 
 @app.route('/check_stock/<ticker>', methods=['GET'])
@@ -116,9 +149,16 @@ def check_stock(ticker):
         )
         
         # Passando a volatilidade de mercado pré-calculada
-        resultados['menos_volatil'] = analyzer.verificar_menos_volatil(
-            ticker_upper, global_volatilidade_mercado
-        )
+        # Garante que global_volatilidade_mercado não é None
+        if global_volatilidade_mercado is not None:
+            resultados['menos_volatil'] = analyzer.verificar_menos_volatil(
+                ticker_upper, global_volatilidade_mercado
+            )
+        else:
+            logging.error("  Global volatility market data not available.")
+            resultados['erros'].append("Dados de volatilidade do mercado não disponíveis para comparação.")
+            resultados['menos_volatil'] = False # Falha o critério se não há benchmark
+            
         resultados['altos_dividendos'] = analyzer.verificar_altos_dividendos_ponderados(ticker_upper)
         
         resultados['todos_criterios_atendidos'] = all([
