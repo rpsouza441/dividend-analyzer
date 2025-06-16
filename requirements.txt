@@ -1,0 +1,6 @@
+Flask==2.3.2
+requests==2.31.0
+beautifulsoup4==4.12.2
+yfinance==0.2.38
+pandas==2.0.3
+numpy==1.24.4
