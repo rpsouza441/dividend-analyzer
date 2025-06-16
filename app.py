@@ -171,6 +171,8 @@ def check_stock(ticker):
         ])
         
         logging.info(f"Verificação completa para {ticker_upper}. Todos os critérios atendidos: {resultados['todos_criterios_atendidos']}")
+        # Convertendo todos os valores numpy.bool_ para bool
+        resultados = {k: bool(v) if isinstance(v, np.bool_) else v for k, v in resultados.items()}
         return jsonify(resultados)
 
     except Exception as e:
